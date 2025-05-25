@@ -56,11 +56,6 @@ Lampa inteligentă controlată fără butoane, doar prin gesturi și sunete, con
 - consum total ~1.7 A la luminozitate maximă
 - interfață fără butoane, complet hands-free
 
-## 🔗 Linkuri utile
-
-- [GitHub – Cod sursă](https://github.com/Trelow/Smart_Lamp)
-- [Demo video pe YouTube](https://www.youtube.com/watch?v=rxGVqdD0l4w)
-
 ---
 
 📬 Proiect realizat ca parte a cursului **Proiect PM** – Universitatea Politehnica București, 2025.
