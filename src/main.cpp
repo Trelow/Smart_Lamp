@@ -1,22 +1,19 @@
 #include <VirtualButton.h>
 #include <util/delay.h>
 
-#define TRIG_PIN 3
-#define ECHO_PIN 2
-
-float duration_us, distance_cm;
-
 #include <FastLED.h>
 #include <LiquidCrystal_I2C.h>
 
+#define TRIG_PIN 3
+#define ECHO_PIN 2
+
 #define LED_PIN 6
-#define NUM_LEDS 3
+#define NUM_LEDS 39
 #define BRIGHTNESS 255
 #define LED_TYPE WS2812B
 #define COLOR_ORDER GRB
 
 #define SOUND_PIN 5
-#define TEMP_SENSOR_PIN A1
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
@@ -41,17 +38,17 @@ const MYRGB COLORS[] = {
     {255, 255, 0},   // YELLOW
     {0, 255, 255},   // CYAN
 };
-// ─── Timere pentru clap ───────────────────────────────────────
+
 const unsigned long DEBOUNCE_MS = 50;
 const unsigned long DOUBLE_CLAP_MS = 400;
 const unsigned long COLOR_MODE_TIMEOUT = 2000;
 
-volatile unsigned long lastEdgeTime = 0; // pt. debounce
-volatile bool clapFlag = false;          // setat în ISR
+volatile unsigned long lastEdgeTime = 0;
+volatile bool clapFlag = false;
 
-// TIMER
-#define CLK_HZ 16000000UL                         // freq. cristal
-#define PRESC 1024UL                              // prescaler ales
+// TIMEr
+#define CLK_HZ 16000000UL
+#define PRESC 1024UL
 #define TIMER_TICKS_2S ((CLK_HZ / PRESC) * 2 - 1) // 31249
 
 const uint16_t OCR1A_VAL = (uint16_t)TIMER_TICKS_2S; // 0…65535
@@ -63,14 +60,13 @@ class Lamp {
 public:
   struct Settings {
     byte mode = 0;
-    byte brightness[3] = {BRIGHTNESS, BRIGHTNESS, BRIGHTNESS};
+    byte brightness = BRIGHTNESS;
     byte color[3] = {COLORS[0].r, COLORS[0].g, COLORS[0].b};
   };
   Settings settings;
 
   VButton gesture;
   uint32_t timer;
-  uint32_t tout;
   int filterBuffer[3] = {0, 0, 0};
   byte filterCount = 0;
   volatile byte modeClicks = 0;
@@ -97,18 +93,25 @@ public:
   volatile bool flashPulse = false;
   volatile bool ledOn = false;
 
-  Lamp() {
-    timer = 0;
-    tout = 0;
-  }
+  int lastLightValue = 0;
+
+  Lamp() { timer = 0; }
 };
 
 Lamp lamp;
 
 void ADC_init() {
-  ADMUX = (1 << REFS0) | (0 << REFS1) | (0 << ADLAR) | (0 << MUX3) |
-          (0 << MUX2) | (0 << MUX1) | (1 << MUX0);
-  ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1);
+  ADMUX = (1 << REFS0) | (0 << ADLAR) | (0 << MUX3) | (0 << MUX2) |
+          (0 << MUX1) | (0 << MUX0); // A0
+
+  ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1); // Prescaler = 64
+}
+
+uint16_t ADC_read() {
+  ADCSRA |= (1 << ADSC);
+  while (ADCSRA & (1 << ADSC))
+    ;
+  return ADCW;
 }
 
 void setup() {
@@ -142,30 +145,27 @@ void setup() {
   OCR1A = OCR1A_VAL;
   TIMSK1 = 0;
 
-  // Display
   lcd.init();
   lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Salut, lume!");
-
-  lcd.setCursor(0, 1);
-  lcd.print("LCD I2C test");
 
   // RTC
   rtc.writeProtect(false);
   rtc.halt(false);
+
+  // Time tSet(2025, 5, 30, 4, 58, 30,
+  //           Time::kFriday); // Y, M, D, h, m, s, day-of-week
+  // rtc.time(tSet);
 
   ADC_init();
 }
 
 // TIMER
 void startInactivityTimer() {
-  TCCR1B = 0;              // Stop timer
-  TCNT1 = 0;               // Reset counter
-  TIFR1 |= (1 << OCF1A);   // Clear *pending compare match flag*
-  TIMSK1 |= (1 << OCIE1A); // Enable interrupt
-  TCCR1B =
-      (1 << WGM12) | (1 << CS12) | (1 << CS10); // Start timer: CTC + presc=1024
+  TCCR1B = 0;
+  TCNT1 = 0;
+  TIFR1 |= (1 << OCF1A);
+  TIMSK1 |= (1 << OCIE1A);
+  TCCR1B = (1 << WGM12) | (1 << CS12) | (1 << CS10); // presc = 1024
 }
 
 void stopInactivityTimer() {
@@ -294,28 +294,16 @@ ISR(PCINT2_vect) {
   }
   lastEdgeTime = now;
 
-  // ————— Color‑Mode ACTIV ————————————
   if (lamp.changingColorMode) {
-    // reset hardware-timer
     TCNT1 = 0;
-
-    if (millis() - lamp.lastClapTime < DOUBLE_CLAP_MS)
-      lamp.modeClicks++;
-    else
-      lamp.modeClicks = 1;
 
     lamp.lastClapTime = millis();
 
-    if (lamp.modeClicks == 1) {
-      clapFlag = true;
-    } else if (lamp.modeClicks == 2) {
-      lamp.animFlag = true;
-      lamp.modeClicks = 0;
-    }
+    clapFlag = true;
+
     return;
   }
 
-  // ————— Color‑Mode INACTIV: numărăm claps ——
   if (now - lamp.lastClapTime < DOUBLE_CLAP_MS)
     lamp.clapCount++;
   else
@@ -334,7 +322,7 @@ ISR(PCINT2_vect) {
 void setupPulse() {
   CRGB original[NUM_LEDS];
   for (int i = 0; i < NUM_LEDS; i++) {
-    original[i] = leds[i]; // Save original colors
+    original[i] = leds[i];
   }
 
   for (int b = 0; b <= 255; b += 10) {
@@ -366,25 +354,12 @@ void shutdownPulse() {
   FastLED.show();
 }
 
-// // Fade-away simplu (se stinge lin în ~300 ms)
-// void fadeAway(uint8_t step = 8, uint8_t delay_ms = 12) {
-//   for (int b = FastLED.getBrightness(); b >= 0; b -= step) {
-//     FastLED.setBrightness(b);
-//     FastLED.show();
-//     delay(delay_ms);
-//   }
-//   fill_solid(leds, NUM_LEDS, CRGB::Black);
-//   FastLED.show();
-// }
-
 void smoothSetBrightness(uint8_t targetBrightness, uint8_t steps = 10,
                          uint8_t delay_ms = 10) {
   uint8_t currentBrightness = FastLED.getBrightness();
   int diff = targetBrightness - currentBrightness;
 
-  if (abs(diff) <= 1) {
-    FastLED.setBrightness(targetBrightness);
-    FastLED.show();
+  if (diff == 0) {
     return;
   }
 
@@ -394,17 +369,6 @@ void smoothSetBrightness(uint8_t targetBrightness, uint8_t steps = 10,
     FastLED.show();
     delay(delay_ms);
   }
-}
-
-uint16_t ADC_read() {
-  ADCSRA |= (1 << ADSC);
-  while (ADCSRA & (1 << ADSC))
-    ;
-  return ADC;
-}
-
-void float_to_string(float value, char *buffer, int precision = 2) {
-  dtostrf(value, 6, precision, buffer);
 }
 
 String dayAsString(const Time::Day day) {
@@ -427,31 +391,37 @@ String dayAsString(const Time::Day day) {
   return "(unknown day)";
 }
 
-void displayTemperatureAndTime(float tempC, Time t) {
+void displayInfo(Time t) {
   lcd.setCursor(0, 0);
-  lcd.print("Temp: ");
-  lcd.print((int)tempC);
-  lcd.print((char)223);
-  lcd.print("C   ");
-
-  lcd.setCursor(0, 1);
-  lcd.print("Ora: ");
+  lcd.print("Ora ");
   if (t.hr < 10)
-    lcd.print("0");
+    lcd.print('0');
   lcd.print(t.hr);
-  lcd.print(":");
+  lcd.print(':');
   if (t.min < 10)
-    lcd.print("0");
+    lcd.print('0');
   lcd.print(t.min);
-
-  lcd.print(" ");
+  lcd.print(' ');
 
   String day = dayAsString(t.day);
   lcd.print(day.substring(0, 3));
+
+  lcd.setCursor(0, 1);
+  if (lamp.ledOn) {
+    int brt = lamp.settings.brightness;
+    lcd.print("Brt:");
+    if (brt < 100)
+      lcd.print('0');
+    if (brt < 10)
+      lcd.print('0');
+    lcd.print(brt);
+    lcd.print("   ");
+  } else {
+    lcd.print("LED OFF       ");
+  }
 }
 
 char buf[16];
-
 unsigned long lastDisplayUpdate = 0;
 const unsigned long displayInterval = 1000;
 
@@ -459,20 +429,26 @@ void loop() {
 
   if (millis() - lastDisplayUpdate >= displayInterval) {
     lastDisplayUpdate = millis();
-
-    int analogValue = ADC_read();
-    float voltage = analogValue * (5.0 / 1024.0);
-    float tempC = voltage * 100.0;
-    tempC -= 5;
-
-    Serial.print("ADC: ");
-    char buf[16];
-    float_to_string(tempC, buf);
-    Serial.print(buf);
-    Serial.print(" °C, ");
+    int prev_value = lamp.lastLightValue;
+    lamp.lastLightValue = ADC_read();
 
     Time t = rtc.time();
-    displayTemperatureAndTime(tempC, t);
+    displayInfo(t);
+
+    if (!lamp.ledOn && lamp.lastLightValue < 20) {
+      // Turn on LED
+      for (int i = 0; i < NUM_LEDS; i++) {
+        leds[i] = CRGB(lamp.settings.color[0], lamp.settings.color[1],
+                       lamp.settings.color[2]);
+      }
+
+      if (prev_value > 20) {
+        FastLED.show();
+        lamp.ledOn = true;
+        lamp.gesture.reset();
+        setupPulse();
+      }
+    }
   }
 
   if (lamp.flashPulse) {
@@ -483,6 +459,7 @@ void loop() {
     clapFlag = false;
     if (lamp.changingColorMode) {
       lamp.currentColor++;
+      Serial.println(lamp.currentColor);
       if (lamp.currentColor >= sizeof(COLORS) / sizeof(COLORS[0])) {
         lamp.currentColor = 0;
       }
@@ -497,21 +474,6 @@ void loop() {
     }
   }
 
-  // if (lamp.animFlag) {
-  //   lamp.animFlag = false;
-
-  //   static bool rainbow = false;
-  //   rainbow = !rainbow;
-
-  //   if (rainbow) {
-  //     fill_rainbow(leds, NUM_LEDS, 0, 7);
-  //   } else {
-  //     MYRGB c = COLORS[lamp.currentColor];
-  //     fill_solid(leds, NUM_LEDS, CRGB(c.r, c.g, c.b));
-  //   }
-  //   FastLED.show();
-  // }
-
   if (millis() - lamp.timer > 50) {
     lamp.timer = millis();
 
@@ -525,19 +487,6 @@ void loop() {
 
     lamp.gesture.poll(dist);
 
-    if (lamp.ledOn) {
-      if (lamp.gesture.hasClicks() && millis() - lamp.tout > 1500) {
-        lamp.ledOn = false;
-        for (int i = 0; i < NUM_LEDS; i++) {
-          leds[i] = CRGB(0, 0, 0);
-        }
-        Serial.println("LED OFF");
-        Serial.print("Distance: ");
-        Serial.print(dist);
-        Serial.println(" cm");
-        FastLED.show();
-      }
-    }
     // Serial.println(lamp.ledOn);
     if (!lamp.ledOn && lamp.gesture.click()) {
       // Turn on LED
@@ -553,25 +502,27 @@ void loop() {
 
     } else if (lamp.gesture.click()) {
       // Toggle LED state
+      lamp.animFlag = false;
+      lamp.changingColorMode = false;
+
       shutdownPulse();
+      lamp.ledOn = false;
     }
 
     if (lamp.gesture.held() && lamp.ledOn) {
       lamp.offset_d = dist;
-      lamp.offset_v = lamp.settings.brightness[lamp.settings.mode];
+      lamp.offset_v = lamp.settings.brightness;
       pulse();
     }
 
     if (lamp.gesture.hold() && lamp.ledOn) {
 
-      lamp.tout = millis();
-
       int diff = lamp.offset_d - dist;
-      int brightness = lamp.offset_v - diff * 12;
+      int brightness = lamp.offset_v - diff * 10;
 
       brightness = constrain(brightness, 10, BRIGHTNESS);
 
-      lamp.settings.brightness[lamp.settings.mode] = brightness;
+      lamp.settings.brightness = brightness;
 
       smoothSetBrightness(brightness, 10, 1);
 
